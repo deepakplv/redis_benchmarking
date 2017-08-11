@@ -17,6 +17,8 @@ const (
 	redis_service_name = "benchmark-redis"
 	redis_queue_name = "benchmark"
 	messageCount = 10000
+	prefetchLimit = 1000
+	batchSize = 1000
 	enque_parallelism = 10  // No. of gorutines for enqueuing
 	deque_parallelism = 10  // No. of consumers for dequeuing
 )
@@ -33,6 +35,10 @@ func main() {
 		fmt.Println("Starting consuming")
 		ConsumeMessages(taskQueue)
 		select {}       // Keep consumer running
+	} else if mode == "bc" {
+		fmt.Println("Starting batch consumer")
+		BatchConsumeMessages(taskQueue)
+		select {}       // Keep batch consumer running
 	} else {
 		fmt.Println("Invalid Flag, Exiting")
 		return
@@ -105,7 +111,7 @@ func publish(taskQueue rmq.Queue, message string) {
 
 func ConsumeMessages(taskQueue rmq.Queue) {
 	// Start consuming and add consumers.
-	taskQueue.StartConsuming(10, time.Millisecond)
+	taskQueue.StartConsuming(prefetchLimit, time.Millisecond)
 	for i := 0; i < deque_parallelism; i++ {
 		name := fmt.Sprintf("consumer %d", i)
 		taskQueue.AddConsumer(name, NewConsumer(i))
@@ -150,4 +156,54 @@ func (consumer *Consumer) Consume(delivery rmq.Delivery) {
 	//fmt.Printf("%s consumed message: %s\n", consumer.name, message.Payload)
 	// Acknowledge the delivery
 	delivery.Ack()
+}
+
+func BatchConsumeMessages(taskQueue rmq.Queue) {
+	// Start consuming and add consumers.
+	taskQueue.StartConsuming(prefetchLimit, time.Millisecond)
+	name := "batchconsumer 1"
+	taskQueue.AddBatchConsumer(name, batchSize, NewBatchConsumer(1))
+}
+
+type BatchConsumer struct {
+	name string
+}
+
+func NewBatchConsumer(tag int) *BatchConsumer {
+	return &BatchConsumer{
+		name:   fmt.Sprintf("batchconsumer%d", tag),
+	}
+}
+
+func (consumer *BatchConsumer) Consume(batch rmq.Deliveries) {
+	// fmt.Printf("%s consumed %d\n", consumer.name, len(batch))
+
+	// Dequeue the messages and get the latency
+	var message Message
+	for i:=0; i<len(batch); i++ {
+		currentMessage := batch[i]
+		json.Unmarshal([]byte(currentMessage.Payload()), &message)
+		enqueue_time := message.EnqueueTime
+		latency := uint64(time.Now().UnixNano()) - enqueue_time
+
+		// Average out the latencies
+		if count >= messageCount - 1 {
+			fmt.Println("Average Latency for last item is ", totalLatency / count, count)
+			timeElapsedSeconds := float64(time.Now().UnixNano() - startTime) / float64(time.Second)
+			fmt.Println("No. of messages dequeued per second: ", float64(1) / (timeElapsedSeconds / float64(messageCount - 1)))
+			os.Exit(1)
+		}
+		if latency != 0 {
+			atomic.AddUint64(&count, 1)
+			atomic.AddUint64(&totalLatency, latency)
+		}
+
+		// Set the startTime after first message is read, so that we can get enqueues per second
+		if count == 1 {
+			startTime = time.Now().UnixNano()
+		}
+	}
+
+	// Acknowledge the batch delivery
+	batch.Ack()
 }
