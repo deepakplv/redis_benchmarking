@@ -67,7 +67,7 @@ func BulkPublisher(taskQueue rmq.Queue) {
 		go func() {
 			defer wg.Done()
 			for ;count <= messageCount-enque_parallelism+1; {
-				message := getMessage()
+				message := getMessage(count)
 				publish(taskQueue, message)
 				atomic.AddUint64(&count, 1)
 			}
@@ -81,7 +81,7 @@ func TimeBoundPublisher(taskQueue rmq.Queue, totalDuration time.Duration) {
 	for i:=0; i<publishingWorkers; i++ {
 		go func() {
 			for {
-				message := getMessage()
+				message := getMessage(count)
 				publish(taskQueue, message)
 				atomic.AddUint64(&count, 1)
 				time.Sleep(time.Millisecond*975)
@@ -96,11 +96,12 @@ func TimeBoundPublisher(taskQueue rmq.Queue, totalDuration time.Duration) {
 }
 
 type Message struct {
-	Payload   map[string]interface{}
+	ID          uint64
+	Payload     map[string]interface{}
 	EnqueueTime uint64
 }
 
-func getMessage() string{
+func getMessage(id uint64) string{
 	payload := map[string]interface{}{
 	        "src": "972525626731",
 	        "dst": "972502224696",
@@ -127,7 +128,7 @@ func getMessage() string{
 			"parent_auth_id": "MANZE1ODRHYWFIZGMXNJ",
 	        },
 	}
-	message := Message{Payload: payload, EnqueueTime: uint64(time.Now().UnixNano())}
+	message := Message{ID: id, Payload: payload, EnqueueTime: uint64(time.Now().UnixNano())}
 	messageBytes, _ := json.Marshal(message)
 	return string(messageBytes)
 }
@@ -262,9 +263,11 @@ func NewTimeBoundConsumer(tag int) *TimeBoundConsumer {
 	}
 }
 
+var mutex = &sync.Mutex{}
 func (consumer *TimeBoundConsumer) Consume(delivery rmq.Delivery) {
 	// If runtime is over, write latencies to file and exit
 	if time.Since(initTime) > runtimeDuration {
+		mutex.Lock()    // Start critical section: To prevent multiple files creation
 		// Create a file and write the latencies
 		file, err := os.Create("/tmp/redis_latencies.txt")
 		if err != nil {
@@ -278,12 +281,10 @@ func (consumer *TimeBoundConsumer) Consume(delivery rmq.Delivery) {
 		if err = w.Flush(); err != nil {
 	                panic(err)
 	        }
-                if err = w.Flush(); err != nil {
-                        panic(err)
-                }
 
 		fmt.Println("Average Latency for last item is ", totalLatency / count, count)
 		os.Exit(1)
+		mutex.Unlock()  // Ends critical section: Although unreachable due to exit above
 	}
 
 	// Dequeue the message and get the latency
@@ -296,7 +297,7 @@ func (consumer *TimeBoundConsumer) Consume(delivery rmq.Delivery) {
 	atomic.AddUint64(&totalLatency, latency)
 	// Add latency to list after converting from nano to millisecond
 	latencyList = append(latencyList, latency/1000000)
-
+	//fmt.Println("Message ID: ", message.ID)
 	// Acknowledge the delivery
 	delivery.Ack()
 }
